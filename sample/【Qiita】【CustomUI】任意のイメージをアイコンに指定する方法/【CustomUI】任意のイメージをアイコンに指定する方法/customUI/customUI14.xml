@@ -1,0 +1,12 @@
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui">
+  <ribbon>
+    <tabs>
+      <tab id="sampleRibbon" label="サンプルリボン">
+        <group id="imageTest" label="イメージテスト">
+            <button id="testImageMso" label="①" size="large" imageMso="HappyFace" onAction="btnTestImageMso_Click"/> 
+            <button id="testImage" label="②" size="large" image="test1" onAction="btnTestImage_Click"/>  
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>
