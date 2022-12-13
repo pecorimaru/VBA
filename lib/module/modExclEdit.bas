@@ -163,3 +163,25 @@ Public Sub shapesSaveAsPicture(ByRef shp As Shape, ByVal savePath As String)
 
 End Sub
 
+'************************************************************************************
+' ã@Å@î\    :ê‘ògÇçÏê¨
+'************************************************************************************
+Public Sub mkFrmAttn()
+
+    Dim frmAttn As Shape
+
+    Set frmAttn = ActiveSheet.Shapes.AddShape(msoShapeRectangle, Selection.Left, Selection.Top, 124, 42)
+
+    redFrame.Fill.Visible = msoFalse
+    With frmAttn.Line
+        .Visible = msoTrue
+        .ForeColor.RGB = RGB(255, 0, 0)
+        .Transparency = 0
+        .Weight = 2
+    End With
+
+    frmAttn.Select
+
+    Set frmAttn = Nothing
+
+End Sub
