@@ -2,20 +2,20 @@ VERSION 1.0 CLASS
 BEGIN
   MultiUse = -1  'True
 END
-Attribute VB_Name = "clsStringBuilder"
+Attribute VB_Name = "clsStringBuilderFileBuffer"
 Attribute VB_GlobalNameSpace = False
 Attribute VB_Creatable = False
 Attribute VB_PredeclaredId = False
 Attribute VB_Exposed = False
 Option Explicit
 
-
 '******************************************************************************
-' クラス名  : StringBuilder
-' 機能      : 予め指定したメモリ領域をバッファとして利用する文字列連結クラス
+' クラス名  : StringBuilder（ファイルベース実装）
+' 機能      : 一時ファイルをバッファとして利用する文字列連結クラス
 ' 説明      :
 '   - VBA標準の文字列連結(&)は大規模テキストで非効率なため、
 '     StringBuilderパターンを採用。
+'   - メモリ不足対策として、一時ファイルをバッファに使用。
 '   - 大容量テキスト処理やログ生成に適しています。
 '
 ' バージョン: 1.0.0
@@ -24,15 +24,9 @@ Option Explicit
 '******************************************************************************
 
 '******************************************************************************
-' 占有メモリ領域    ※用途に応じて適宜変更
-'******************************************************************************
-Private Const DEFAULT_BUFFER_SIZE As Long = 32768
-Private Const GROWTH_FACTOR As Double = 2#         ' バッファ拡張倍率
-
-'******************************************************************************
 ' モジュール名
 '******************************************************************************
-Private Const CLASS_NAME = "clsStringBuilder"
+Private Const CLASS_NAME = "clsStringBuilderFileBuffer"
 
 '******************************************************************************
 ' エラー番号
@@ -47,21 +41,22 @@ Private Const ERR_NO_DELETE_LENGTH_NEGATIVE = vbObjectError + 1003
 Private Const ERR_MSG_INDEX_NEGATIVE = "{0}位置が負の値です"
 Private Const ERR_MSG_INDEX_OUT_OF_RANGE = "{0}位置（{1}）は範囲外です（可能範囲:0-{2}）"
 Private Const ERR_MSG_DELETE_LENGTH_NEGATIVE = "削除文字数が負の値です"
+Private Const ERR_MSG_TEMP_FILE_CREATE_FAILED = "一時ファイルの作成に失敗しました（{0}回リトライ後）: {1}"
 
 '******************************************************************************
 ' クラス変数
 '******************************************************************************
-Private p_buf As String
-Private p_currentLength As Long
-Private p_bufferSizeOverCount As Long
+Private p_tempFilePath As String        ' 一時ファイルのパス
+Private p_fileHandle As Integer         ' ファイルハンドル
+Private p_currentLength As Long         ' 現在の文字数
+Private p_isFileOpen As Boolean         ' ファイルオープン状態
 
 '******************************************************************************
 ' 機　能    : クラスの初期化処理
 '******************************************************************************
 Private Sub Class_Initialize()
-    p_buf = String$(DEFAULT_BUFFER_SIZE, vbNullChar)
+    Call CreateTempFile
     p_currentLength = 0
-    p_bufferSizeOverCount = 0
 End Sub
 
 '******************************************************************************
@@ -69,10 +64,6 @@ End Sub
 '******************************************************************************
 Private Sub Class_Terminate()
     Call Dispose
-    If p_bufferSizeOverCount > 0 Then
-        Debug.Print "バッファサイズオーバー回数：" + p_bufferSizeOverCount + "回"
-        Debug.Print "バッファサイズ：" + p_currentLength
-    End If
 End Sub
 
 '******************************************************************************
@@ -90,7 +81,7 @@ Public Property Get IsEmpty() As Boolean
 End Property
 
 '******************************************************************************
-' 機　能    : 全体の文字列を取得（Textプロパティ）
+' 機　能    : 全体の文字列を取得
 '******************************************************************************
 Public Property Get Text() As String
     Text = Me.ToString()
@@ -98,20 +89,26 @@ End Property
 
 '******************************************************************************
 ' 機　能    : 文字列をバッファに追加
+' 説  明    : 指定された文字列を一時ファイルの末尾に追加する
 ' -----------------------------------------------------------------------------
 ' 引　数    : text - 追加する文字列
 ' 戻り値    : なし
+' 例　外    : ファイルが開かれていない場合はエラーが発生
 '******************************************************************************
 Public Sub Append(ByVal addText As String)
     If addText = "" Then
         Exit Sub
     End If
-    ' バッファサイズを超えた場合はサイズを増やして再配置
-    If p_currentLength + Len(addText) > Len(p_buf) Then
-        p_buf = p_buf & String$(CLng(Len(p_buf) * GROWTH_FACTOR) + Len(addText), vbNullChar)
-    End If
-    Mid(p_buf, p_currentLength + 1) = addText
+    
+    On Error GoTo ErrorHandler
+    
+    Print #p_fileHandle, addText;
     p_currentLength = p_currentLength + Len(addText)
+    
+    Exit Sub
+    
+ErrorHandler:
+    Err.Raise Err.Number, CLASS_NAME & ".Append", Err.Description
 End Sub
 
 '******************************************************************************
@@ -121,42 +118,107 @@ End Sub
 ' -----------------------------------------------------------------------------
 ' 引　数    : text - 追加する文字列（省略可能、省略時は空文字列）
 ' 戻り値    : なし
+' 例　外    : ファイルが開かれていない場合はエラーが発生
 '******************************************************************************
 Public Sub AppendLine(Optional ByVal addText As String = "")
-    Call Me.Append(addText)
-    Call Me.Append(vbCrLf)
+    Me.Append addText
+    Me.Append vbCrLf
 End Sub
 
 '******************************************************************************
 ' 機　能    : バッファ内の全文字列を取得
 ' 説  明    : 一時ファイルに蓄積された全ての文字列を読み込んで返す
+' 注意事項  : ・ファイル開閉処理を伴うため、頻繁な呼び出しは避ける
+'           : ・大容量データの場合はメモリ不足の可能性あり
 ' -----------------------------------------------------------------------------
 ' 引　数    : なし
 ' 戻り値    : String - バッファ内の全文字列（空の場合は空文字列）
+' 例外      : ファイル読み取りエラー時は例外が発生
 '******************************************************************************
 Public Function ToString() As String
-    ToString = Left$(p_buf, p_currentLength)
+    If p_currentLength = 0 Then
+        ToString = ""
+        Exit Function
+    End If
+    
+    On Error GoTo ErrorHandler
+    
+    Dim readHandle As Integer
+    Dim fileContent As String
+    Dim originalHandle As Integer
+    
+    ' 現在のハンドルを保存
+    originalHandle = p_fileHandle
+    
+    ' 現在のファイルをフラッシュして閉じる
+    Close #p_fileHandle
+    p_isFileOpen = False
+    
+    ' 読み取り専用で開く
+    readHandle = FreeFile
+    Open p_tempFilePath For Binary As #readHandle
+    
+    ' ファイル全体を読み込み
+    If LOF(readHandle) > 0 Then
+        fileContent = Input$(LOF(readHandle), #readHandle)
+    Else
+        fileContent = ""
+    End If
+    
+    Close #readHandle
+    
+    ' 元のファイルを書き込みモードで再度開く
+    p_fileHandle = FreeFile
+    Open p_tempFilePath For Append As #p_fileHandle
+    p_isFileOpen = True
+    
+    ToString = fileContent
+    Exit Function
+    
+ErrorHandler:
+    ' ファイルが開かれている場合は強制的に閉じる
+    On Error Resume Next
+    If readHandle > 0 Then Close #readHandle
+    Err.Raise Err.Number, CLASS_NAME & ".ToString", Err.Description
 End Function
 
 '************************************************************************************
 ' 機　能    : バッファの内容をクリア
+' 説  明    : 一時ファイルを再作成してバッファ内の全ての文字列を削除する
 ' -----------------------------------------------------------------------------------
 ' 引　数    : なし
 ' 戻り値    : なし
+' 例外      : ファイル操作エラー時は例外が発生
 '************************************************************************************
 Public Sub Clear()
-    p_buf = String$(DEFAULT_BUFFER_SIZE, vbNullChar)
+    
+    On Error GoTo ErrorHandler
+    
+    Close #p_fileHandle
+    Open p_tempFilePath For Output As #p_fileHandle
     p_currentLength = 0
+    
+    Exit Sub
+    
+ErrorHandler:
+    Err.Raise Err.Number, CLASS_NAME & ".Clear", Err.Description
 End Sub
 
 '******************************************************************************
 ' 機　能    : 指定位置に文字列を挿入
+' 説  明    : バッファ内の指定された位置に文字列を挿入する
+'           : ファイルベース実装のため、一時的にメモリに読み込んで再構築する
+' 注意事項  : ・大容量データの場合はメモリ不足の可能性あり
+'           : ・パフォーマンスが悪いため、頻繁な使用は避ける
+'           : ・挿入位置が範囲外の場合はエラーが発生
 ' -----------------------------------------------------------------------------
 ' 引　数    : index - 挿入位置（0ベース）
 '           : text  - 挿入する文字列
 ' 戻り値    : なし
+' 例　外    : ファイル操作エラー、インデックス範囲外エラーが発生
 '******************************************************************************
 Public Sub Insert(ByVal index As Long, ByVal addText As String)
+    
     ' 挿入位置の負数チェック
     If index < 0 Then
         Err.Raise ERR_NO_INDEX_NEGATIVE, CLASS_NAME, FormatMessage(ERR_MSG_INDEX_NEGATIVE, "挿入")
@@ -168,39 +230,55 @@ Public Sub Insert(ByVal index As Long, ByVal addText As String)
                 FormatMessage(ERR_MSG_INDEX_OUT_OF_RANGE, "挿入", index, p_currentLength)
     End If
     
+    ' 空文字列の場合は何もしない
     If addText = "" Then
         Exit Sub
     End If
     
-    ' 末尾への挿入の場合はAppendを使用
+    ' 末尾への挿入の場合はAppendを使用（最適化）
     If index = p_currentLength Then
         Call Me.Append(addText)
         Exit Sub
     End If
-
+    
+    On Error GoTo ErrorHandler
+    
     Dim originalContent As String
+    Dim beforePart As String
+    Dim afterPart As String
+    Dim newContent As String
+    
+    ' 現在の内容を取得
     originalContent = Me.ToString()
     
-    Dim beforePart As String
+    ' 挿入位置で文字列を分割
     beforePart = Left(originalContent, index)
-    
-    Dim afterPart As String
     afterPart = Mid(originalContent, index + 1)
-    
-    ' バッファをクリアして再セット
+        
+    ' ファイルをクリアして新しい内容を書き込み
     Me.Clear
     Me.Append beforePart
     Me.Append addText
     Me.Append afterPart
-
+    
+    Exit Sub
+    
+ErrorHandler:
+    Err.Raise Err.Number, CLASS_NAME & ".Insert", Err.Description
 End Sub
 
 '******************************************************************************
 ' 機　能    : 指定範囲の文字列を削除
+' 説  明    : バッファ内の指定された範囲の文字列を削除する
+'           : ファイルベース実装のため、一時的にメモリに読み込んで再構築する
+' 注意事項  : ・大容量データの場合はメモリ不足の可能性あり
+'           : ・パフォーマンスが悪いため、頻繁な使用は避ける
+'           : ・削除範囲が範囲外の場合はエラーが発生
 ' -----------------------------------------------------------------------------
 ' 引　数    : startIndex - 削除開始位置（0ベース）
 '           : length     - 削除する文字数
 ' 戻り値    : なし
+' 例　外    : ファイル操作エラー、インデックス範囲外エラーが発生
 '******************************************************************************
 Public Sub Remove(ByVal startIndex As Long, ByVal removeLength As Long)
     ' 削除開始位置の負数チェック
@@ -218,11 +296,12 @@ Public Sub Remove(ByVal startIndex As Long, ByVal removeLength As Long)
     If removeLength < 0 Then
         Err.Raise ERR_NO_DELETE_LENGTH_NEGATIVE, CLASS_NAME, ERR_MSG_DELETE_LENGTH_NEGATIVE
     End If
-    
+        
+    ' 削除文字数が0の場合は何もしない
     If removeLength = 0 Then
         Exit Sub
     End If
-
+    
     ' 削除範囲を調整（バッファサイズを超えないように）
     Dim actualLength As Long
     If startIndex + removeLength > p_currentLength Then
@@ -231,15 +310,20 @@ Public Sub Remove(ByVal startIndex As Long, ByVal removeLength As Long)
         actualLength = removeLength
     End If
     
+    On Error GoTo ErrorHandler
+    
+    ' 現在の内容を取得
     Dim originalContent As String
     originalContent = Me.ToString()
     
+    ' 削除範囲の終了位置を計算
     Dim endIndex As Long
     endIndex = startIndex + actualLength
     
+    ' 削除前後の部分を取得
     Dim beforePart As String
     beforePart = Left(originalContent, startIndex)
-
+    
     Dim afterPart As String
     afterPart = Mid(originalContent, endIndex + 1)
         
@@ -247,17 +331,95 @@ Public Sub Remove(ByVal startIndex As Long, ByVal removeLength As Long)
     Me.Clear
     Me.Append beforePart
     Me.Append afterPart
+        
+    Exit Sub
+    
+ErrorHandler:
+    Err.Raise Err.Number, CLASS_NAME & ".Remove", Err.Description
+End Sub
 
+'************************************************************************************
+' 機　能    : 一時ファイルを作成してバッファを初期化
+' 説  明    : TEMPフォルダに一意な名前の一時ファイルを作成し、書き込み用に開く
+' 注意事項  : ・ファイル名は日時とランダム値で重複を回避
+'           : ・作成失敗時は最大3回までリトライする
+'           : ・全てのリトライが失敗した場合はp_isFileOpenがFalseに設定される
+' -----------------------------------------------------------------------------------
+' 引　数    : なし
+' 戻り値    : なし
+' 例外      : 全てのリトライが失敗した場合は例外が発生
+'************************************************************************************
+Private Sub CreateTempFile()
+    Const MAX_RETRY_COUNT As Integer = 3
+    Dim retryCount As Integer
+    Dim lastError As String
+    
+    On Error GoTo ErrorHandler
+    
+    For retryCount = 1 To MAX_RETRY_COUNT
+        ' 一時ファイルパスを生成（リトライ毎に異なる名前）
+        p_tempFilePath = Environ("TEMP") & "\" & "SB_" & Format(Now, "yyyymmdd_hhnnss") & "_" & Int(Rnd * 10000) & "_" & retryCount & ".tmp"
+        
+        ' ファイルハンドルを取得
+        p_fileHandle = FreeFile
+        
+        ' ファイルを開く（出力モードで作成）
+        Open p_tempFilePath For Output As #p_fileHandle
+        p_isFileOpen = True
+        
+        Exit Sub
+        
+ErrorHandler:
+        lastError = Err.Description
+        
+        ' ファイルが開いていたら閉じる
+        On Error Resume Next
+        If p_fileHandle > 0 Then
+            Close #p_fileHandle
+        End If
+        On Error GoTo ErrorHandler
+        
+        ' 最後のリトライでも失敗した場合
+        If retryCount = MAX_RETRY_COUNT Then
+            p_isFileOpen = False
+            Err.Raise Err.Number, CLASS_NAME & ".CreateTempFile", _
+                    Replace(ERR_MSG_TEMP_FILE_CREATE_FAILED, MAX_RETRY_COUNT, lastError)
+        End If
+        
+        ' 少し待ってからリトライ（オプション）
+        Application.Wait DateAdd("s", 1, Now)
+    Next retryCount
 End Sub
 
 '************************************************************************************
 ' 機　能    : リソースの解放処理
+' 説  明    : ファイルハンドルの解放、一時ファイルの削除、内部変数の初期化を行う
+' 注意事項  : ・全ての処理でエラーを無視する（On Error Resume Next）
+'           : ・Class_Terminateから自動的に呼び出される
 ' -----------------------------------------------------------------------------------
 ' 引　数    : なし
 ' 戻り値    : なし
+' 例外      : なし（全てのエラーを無視）
 '************************************************************************************
 Public Sub Dispose()
-    p_buf = vbNullString
+    On Error Resume Next
+    
+    ' ファイルを閉じる
+    If p_isFileOpen And p_fileHandle > 0 Then
+        Close #p_fileHandle
+        p_isFileOpen = False
+    End If
+    
+    ' 一時ファイルを削除
+    If p_tempFilePath <> "" Then
+        If Dir(p_tempFilePath) <> "" Then
+            Kill p_tempFilePath
+        End If
+        p_tempFilePath = ""
+    End If
+    
+    ' 変数をリセット
+    p_fileHandle = 0
     p_currentLength = 0
 End Sub
 
@@ -270,6 +432,7 @@ End Sub
 ' 引　数    : template - テンプレート文字列
 '           : args     - 置き換える値（可変引数）
 ' 戻り値    : String   - 置き換え後の文字列
+' 例　外    : なし
 '******************************************************************************
 Private Function FormatMessage( _
     ByVal template As String, _
@@ -290,4 +453,3 @@ Private Function FormatMessage( _
     
 End Function
  
-
