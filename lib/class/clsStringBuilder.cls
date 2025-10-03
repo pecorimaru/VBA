@@ -1,30 +1,20 @@
-VERSION 1.0 CLASS
-BEGIN
-  MultiUse = -1  'True
-END
-Attribute VB_Name = "clsStringBuilder"
-Attribute VB_GlobalNameSpace = False
-Attribute VB_Creatable = False
-Attribute VB_PredeclaredId = False
-Attribute VB_Exposed = False
 Option Explicit
 
-
 '******************************************************************************
-' クラス名  : StringBuilder
+' クラス名  : clsStringBuilder
 ' 機能      : 予め指定したメモリ領域をバッファとして利用する文字列連結クラス
 ' 説明      :
-'   - VBA標準の文字列連結(&)は大規模テキストで非効率なため、
-'     StringBuilderパターンを採用。
-'   - 大容量テキスト処理やログ生成に適しています。
+'   - VBA標準の文字列連結(&)は大規模テキストで非効率なため
+'     StringBuilderパターンを採用
 '
 ' バージョン: 1.0.0
 ' -----------------------------------------------------------------------------
-' 履歴      : 2025/09/27  Pecorimaru  Ver.1.0.0  新規作成
+' 履歴      : 2025/09/27  pecorimaru  Ver.1.0.0  新規作成
 '******************************************************************************
 
 '******************************************************************************
-' 占有メモリ領域    ※用途に応じて適宜変更
+' バッファサイズ設定
+' ※1文字あたり2バイトであるため、実際に占有するメモリ領域はバッファサイズ*2
 '******************************************************************************
 Private Const DEFAULT_BUFFER_SIZE As Long = 32768
 Private Const GROWTH_FACTOR As Double = 2#         ' バッファ拡張倍率
@@ -68,11 +58,11 @@ End Sub
 ' 機　能    : クラスの終了処理
 '******************************************************************************
 Private Sub Class_Terminate()
-    Call Dispose
     If p_bufferSizeOverCount > 0 Then
-        Debug.Print "バッファサイズオーバー回数：" + p_bufferSizeOverCount + "回"
-        Debug.Print "バッファサイズ：" + p_currentLength
+        Debug.Print "バッファサイズ超過回数：" + CStr(p_bufferSizeOverCount) + "回"
+        Debug.Print "最終文字数/バッファサイズ：" + CStr(Me.Length) + "/" + CStr(Me.Capacity)
     End If
+    Call Dispose
 End Sub
 
 '******************************************************************************
@@ -80,6 +70,13 @@ End Sub
 '******************************************************************************
 Public Property Get Length() As Long
     Length = p_currentLength
+End Property
+
+'******************************************************************************
+' 機　能    : 現在のバッファサイズを取得
+'******************************************************************************
+Public Property Get Capacity() As Long
+    Capacity = Len(p_buf)
 End Property
 
 '******************************************************************************
@@ -99,37 +96,20 @@ End Property
 '******************************************************************************
 ' 機　能    : 文字列をバッファに追加
 ' -----------------------------------------------------------------------------
-' 引　数    : text - 追加する文字列
+' 引　数    : str - 追加する文字列
 ' 戻り値    : なし
 '******************************************************************************
-Public Sub Append(ByVal addText As String)
-    If addText = "" Then
+Public Sub Append(ByVal str As String)
+    If str = "" Then
         Exit Sub
     End If
-    ' バッファサイズを超えた場合はサイズを増やして再配置
-    If p_currentLength + Len(addText) > Len(p_buf) Then
-        p_buf = p_buf & String$(CLng(Len(p_buf) * GROWTH_FACTOR) + Len(addText), vbNullChar)
-    End If
-    Mid(p_buf, p_currentLength + 1) = addText
-    p_currentLength = p_currentLength + Len(addText)
-End Sub
-
-'******************************************************************************
-' 機　能    : 文字列と改行をバッファに追加
-' 説  明    : 指定された文字列の末尾に改行文字（vbCrLf）を付加してバッファに追加する
-'           : textが省略された場合は改行のみを追加する
-' -----------------------------------------------------------------------------
-' 引　数    : text - 追加する文字列（省略可能、省略時は空文字列）
-' 戻り値    : なし
-'******************************************************************************
-Public Sub AppendLine(Optional ByVal addText As String = "")
-    Call Me.Append(addText)
-    Call Me.Append(vbCrLf)
+    Call EnsureCapacity(Len(str))
+    Mid(p_buf, p_currentLength + 1) = str
+    p_currentLength = p_currentLength + Len(str)
 End Sub
 
 '******************************************************************************
 ' 機　能    : バッファ内の全文字列を取得
-' 説  明    : 一時ファイルに蓄積された全ての文字列を読み込んで返す
 ' -----------------------------------------------------------------------------
 ' 引　数    : なし
 ' 戻り値    : String - バッファ内の全文字列（空の場合は空文字列）
@@ -138,12 +118,24 @@ Public Function ToString() As String
     ToString = Left$(p_buf, p_currentLength)
 End Function
 
-'************************************************************************************
+'******************************************************************************
+' 機　能    : 文字列と改行をバッファに追加
+' 説  明    : 追加する文字列が省略された場合は改行のみを追加する
+' -----------------------------------------------------------------------------
+' 引　数    : str - 追加する文字列（省略可能）
+' 戻り値    : なし
+'******************************************************************************
+Public Sub AppendLine(Optional ByVal str As String = "")
+    Call Me.Append(str)
+    Call Me.Append(vbCrLf)
+End Sub
+
+'******************************************************************************
 ' 機　能    : バッファの内容をクリア
-' -----------------------------------------------------------------------------------
+' -----------------------------------------------------------------------------
 ' 引　数    : なし
 ' 戻り値    : なし
-'************************************************************************************
+'******************************************************************************
 Public Sub Clear()
     p_buf = String$(DEFAULT_BUFFER_SIZE, vbNullChar)
     p_currentLength = 0
@@ -152,66 +144,61 @@ End Sub
 '******************************************************************************
 ' 機　能    : 指定位置に文字列を挿入
 ' -----------------------------------------------------------------------------
-' 引　数    : index - 挿入位置（0ベース）
-'           : text  - 挿入する文字列
+' 引　数    : offset - 挿入位置（0ベース）
+'           : str    - 挿入する文字列
 ' 戻り値    : なし
 '******************************************************************************
-Public Sub Insert(ByVal index As Long, ByVal addText As String)
+Public Sub Insert(ByVal offset As Long, ByVal str As String)
     ' 挿入位置の負数チェック
-    If index < 0 Then
+    If offset < 0 Then
         Err.Raise ERR_NO_INDEX_NEGATIVE, CLASS_NAME, FormatMessage(ERR_MSG_INDEX_NEGATIVE, "挿入")
     End If
     
     ' 挿入位置の範囲チェック
-    If index > p_currentLength Then
+    If offset > p_currentLength Then
         Err.Raise ERR_NO_INDEX_OUT_OF_RANGE, CLASS_NAME, _
-                FormatMessage(ERR_MSG_INDEX_OUT_OF_RANGE, "挿入", index, p_currentLength)
+                FormatMessage(ERR_MSG_INDEX_OUT_OF_RANGE, "挿入", offset, p_currentLength)
     End If
     
-    If addText = "" Then
+    ' 挿入位置が末尾の場合はAppendを使用
+    If offset = p_currentLength Then
+        Call Me.Append(str)
         Exit Sub
     End If
     
-    ' 末尾への挿入の場合はAppendを使用
-    If index = p_currentLength Then
-        Call Me.Append(addText)
+    If str = "" Then
         Exit Sub
     End If
 
-    Dim originalContent As String
-    originalContent = Me.ToString()
+    Call EnsureCapacity(Len(str))
     
-    Dim beforePart As String
-    beforePart = Left(originalContent, index)
+    ' 挿入位置以降の文字列を挿入する文字数分シフトする
+    Mid(p_buf, offset + 1 + Len(str)) = Mid$(p_buf, offset + 1, p_currentLength)
     
-    Dim afterPart As String
-    afterPart = Mid(originalContent, index + 1)
+    ' 挿入位置に文字列をセット
+    Mid(p_buf, offset + 1) = str
     
-    ' バッファをクリアして再セット
-    Me.Clear
-    Me.Append beforePart
-    Me.Append addText
-    Me.Append afterPart
+    p_currentLength = p_currentLength + Len(str)
 
 End Sub
 
 '******************************************************************************
 ' 機　能    : 指定範囲の文字列を削除
 ' -----------------------------------------------------------------------------
-' 引　数    : startIndex - 削除開始位置（0ベース）
-'           : length     - 削除する文字数
+' 引　数    : start        - 削除開始位置（0ベース）
+'           : removeLength - 削除する文字数
 ' 戻り値    : なし
 '******************************************************************************
-Public Sub Remove(ByVal startIndex As Long, ByVal removeLength As Long)
+Public Sub Remove(ByVal start As Long, ByVal removeLength As Long)
     ' 削除開始位置の負数チェック
-    If startIndex < 0 Then
+    If start < 0 Then
         Err.Raise ERR_NO_INDEX_NEGATIVE, CLASS_NAME, FormatMessage(ERR_MSG_INDEX_NEGATIVE, "削除開始")
     End If
     
     ' 削除開始位置の範囲チェック
-    If startIndex >= p_currentLength Then
+    If start >= p_currentLength Then
         Err.Raise ERR_NO_INDEX_OUT_OF_RANGE, CLASS_NAME, _
-                FormatMessage(ERR_MSG_INDEX_OUT_OF_RANGE, "削除開始", startIndex, p_currentLength - 1)
+                FormatMessage(ERR_MSG_INDEX_OUT_OF_RANGE, "削除開始", start, p_currentLength - 1)
     End If
     
     ' 削除文字数の負数チェック
@@ -225,40 +212,48 @@ Public Sub Remove(ByVal startIndex As Long, ByVal removeLength As Long)
 
     ' 削除範囲を調整（バッファサイズを超えないように）
     Dim actualLength As Long
-    If startIndex + removeLength > p_currentLength Then
-        actualLength = p_currentLength - startIndex
+    If start + removeLength > p_currentLength Then
+        actualLength = p_currentLength - start
     Else
         actualLength = removeLength
     End If
     
-    Dim originalContent As String
-    originalContent = Me.ToString()
+    ' 削除開始位置 + 削除する文字数以降の文字列を削除開始位置へシフトする
+    Mid(p_buf, start + 1) = Mid$(p_buf, start + actualLength + 1, p_currentLength - actualLength)
     
-    Dim endIndex As Long
-    endIndex = startIndex + actualLength
+    ' バッファ内の全文字数 - 削除する文字数以降の文字列をクリアする
+    Mid(p_buf, p_currentLength - actualLength + 1) = String$(removeLength, vbNullChar)
     
-    Dim beforePart As String
-    beforePart = Left(originalContent, startIndex)
-
-    Dim afterPart As String
-    afterPart = Mid(originalContent, endIndex + 1)
-        
-    ' ファイルをクリアして新しい内容を書き込み
-    Me.Clear
-    Me.Append beforePart
-    Me.Append afterPart
+    p_currentLength = p_currentLength - actualLength
 
 End Sub
 
-'************************************************************************************
-' 機　能    : リソースの解放処理
+'******************************************************************************
+' 機　能    : バッファサイズの拡張
+' 説　明    : バッファサイズを超過した場合はサイズを拡張して再配置する
+'           : -- サイズの拡張方法 --
+'           : 現在のバッファサイズ + (初期バッファサイズ * 超過回数 * 拡張倍率) + 追加文字数
 ' -----------------------------------------------------------------------------------
+' 引　数    : strLength - 追加文字数
+' 戻り値    : なし
+'******************************************************************************
+Private Sub EnsureCapacity(ByVal strLength As Long)
+    If p_currentLength + strLength > Len(p_buf) Then
+        p_bufferSizeOverCount = p_bufferSizeOverCount + 1
+        p_buf = p_buf & String$(CLng(DEFAULT_BUFFER_SIZE * p_bufferSizeOverCount * GROWTH_FACTOR) + strLength, vbNullChar)
+    End If
+End Sub
+
+'******************************************************************************
+' 機　能    : リソースの解放処理
+' -----------------------------------------------------------------------------
 ' 引　数    : なし
 ' 戻り値    : なし
-'************************************************************************************
-Public Sub Dispose()
+'******************************************************************************
+Private Sub Dispose()
     p_buf = vbNullString
     p_currentLength = 0
+    p_bufferSizeOverCount = 0
 End Sub
 
 '******************************************************************************
@@ -289,5 +284,4 @@ Private Function FormatMessage( _
     FormatMessage = result
     
 End Function
- 
 
