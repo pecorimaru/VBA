@@ -7,6 +7,7 @@ Option Explicit
 '   - VBA標準の文字列連結(&)は大規模テキストで非効率なため
 '     StringBuilderパターンを採用
 '
+' 注意点    : 文字数の上限は約5.36億桁（Midステートメントの限界が約1GBのため）
 ' バージョン: 1.0.0
 ' -----------------------------------------------------------------------------
 ' 履歴      : 2025/09/27  pecorimaru  Ver.1.0.0  新規作成
@@ -37,6 +38,8 @@ Private Const ERR_NO_DELETE_LENGTH_NEGATIVE = vbObjectError + 1003
 Private Const ERR_MSG_INDEX_NEGATIVE = "{0}位置が負の値です"
 Private Const ERR_MSG_INDEX_OUT_OF_RANGE = "{0}位置（{1}）は範囲外です（可能範囲:0-{2}）"
 Private Const ERR_MSG_DELETE_LENGTH_NEGATIVE = "削除文字数が負の値です"
+Private Const ERR_MSG_BUFFER_OVERFLOW = "clsStringBuilderのバッファがサイズ制限を超えた可能性があります。" & vbLf & _
+                                        "（現在:{0}桁, 上限:約5.36億桁）"
 
 '******************************************************************************
 ' クラス変数
@@ -103,9 +106,23 @@ Public Sub Append(ByVal str As String)
     If str = "" Then
         Exit Sub
     End If
-    Call EnsureCapacity(Len(str))
+    
+    Dim strLength As Long
+    strLength = Len(str)
+    
+    Call EnsureCapacity(strLength)
+    
+    On Error GoTo ErrorHandler
+
     Mid(p_buf, p_currentLength + 1) = str
-    p_currentLength = p_currentLength + Len(str)
+    
+    p_currentLength = p_currentLength + strLength
+    
+    Exit Sub
+
+ErrorHandler:
+    Err.Raise Err.Number, CLASS_NAME & ".Append", _
+              Err.Description & vbLf & FormatMessage(ERR_MSG_BUFFER_OVERFLOW, p_currentLength + strLength)
 End Sub
 
 '******************************************************************************
@@ -170,16 +187,26 @@ Public Sub Insert(ByVal offset As Long, ByVal str As String)
         Exit Sub
     End If
 
-    Call EnsureCapacity(Len(str))
+    Dim strLength As Long
+    strLength = Len(str)
+
+    Call EnsureCapacity(strLength)
+    
+    On Error GoTo ErrorHandler
     
     ' 挿入位置以降の文字列を挿入する文字数分シフトする
-    Mid(p_buf, offset + 1 + Len(str)) = Mid$(p_buf, offset + 1, p_currentLength)
+    Mid(p_buf, offset + 1 + strLength) = Mid$(p_buf, offset + 1)
     
     ' 挿入位置に文字列をセット
     Mid(p_buf, offset + 1) = str
     
-    p_currentLength = p_currentLength + Len(str)
+    p_currentLength = p_currentLength + strLength
 
+    Exit Sub
+
+ErrorHandler:
+    Err.Raise Err.Number, CLASS_NAME & ".Insert", _
+              Err.Description & vbLf & FormatMessage(ERR_MSG_BUFFER_OVERFLOW, p_currentLength + strLength)
 End Sub
 
 '******************************************************************************
@@ -219,7 +246,7 @@ Public Sub Remove(ByVal start As Long, ByVal removeLength As Long)
     End If
     
     ' 削除開始位置 + 削除する文字数以降の文字列を削除開始位置へシフトする
-    Mid(p_buf, start + 1) = Mid$(p_buf, start + actualLength + 1, p_currentLength - actualLength)
+    Mid(p_buf, start + 1) = Mid$(p_buf, start + actualLength + 1)
     
     ' バッファ内の全文字数 - 削除する文字数以降の文字列をクリアする
     Mid(p_buf, p_currentLength - actualLength + 1) = String$(removeLength, vbNullChar)
